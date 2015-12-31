@@ -8,31 +8,44 @@ var baseUrl = 'http://qiita.com';
 var hatebuApiUrl = 'http://api.b.st-hatena.com/entry.count';
 
 function getThemeUrls(callback) {
-    scraperjs.StaticScraper.create(baseUrl + '/advent-calendar/2014')
-        .scrape(function($) {
-            return $(".adventCalendar_labelContainer a").map(function() {
-                var title = $(this).text();
-                var url = $(this).attr('href');
-                if (!url.match(/feed$/)) {
-                    return {
-                        title: title,
-                        url: url
-                    };
-                }
-            }).get();
-        }, function(themes) {
-            callback(null, themes);
-        })
+    async.reduce(Array.from({
+        length: 19
+    }, (v, k) => k), [], function(themes, page, nestCallBack) {
+        scraperjs.StaticScraper.create(baseUrl + '/advent-calendar/2015/calendars?page=' + (page + 1))
+            .delay(1000, function($) {
+                return $;
+            })
+            .scrape(function($) {
+                return $(".adventCalendarList_calendarTitle a").map(function() {
+                    var title = $(this).text();
+                    console.log(page + ": " + title);
+                    var url = $(this).attr('href');
+                    if (!url.match(/feed$/)) {
+                        return {
+                            title: title,
+                            url: url
+                        };
+                    }
+                }).get();
+            }, function(results) {
+                nestCallBack(null, themes.concat(results));
+            })
+    }, function(err, results) {
+        callback(null, results);
+    });
 }
 
 function getEntryUrls(theme, callback) {
-    var themeUrl = theme['url'];
-    scraperjs.StaticScraper.create(baseUrl + themeUrl)
+    var themeUrl = baseUrl + theme['url'];
+    scraperjs.StaticScraper.create(themeUrl)
+        .delay(3000, function($) {
+            return $;
+        })
         .scrape(function($) {
-            return $(".adventCalendar_calendar_day").map(function() {
-                var day = $(".adventCalendar_calendar_date", this).text();
-                var text = $(".adventCalendar_calendar_entry a", this).text();
-                var url = $(".adventCalendar_calendar_entry a", this).attr("href");
+            return $(".adventCalendarCalendar_day").map(function() {
+                var day = $(".adventCalendarCalendar_date", this).text();
+                var text = $(".adventCalendarCalendar_comment a", this).text();
+                var url = $(".adventCalendarCalendar_comment a", this).attr("href");
                 if (url !== undefined) {
                     if (!url.match(/^http/)) {
                         url = baseUrl + url;
@@ -45,6 +58,7 @@ function getEntryUrls(theme, callback) {
                 }
             }).get();
         }, function(entries) {
+            console.log(entries);
             callback(null, {
                 themeTitle: theme['title'],
                 themeCalendarUrl: theme['url'],
@@ -54,45 +68,41 @@ function getEntryUrls(theme, callback) {
 }
 
 function getHatebuCount(entry, callback) {
-    setTimeout(function() {
-        rest.get(hatebuApiUrl, {
-            query: {
-                'url': entry['url']
-            }
-        }).on('complete', function(data, response) {
-            if (data instanceof Error) {
-                console.log('Error:', data.message);
-                this.retry(5000);
-            } else {
-                var count = data ? data : 0;
-                // console.log(entry['day'] + "日目 " + entry['text'] + ": " + count);
-                callback(null, {
-                    day: entry['day'],
-                    title: entry['text'],
-                    url: entry['url'],
-                    count: count
-                });
-            }
-        });
-    }, 200);
+    rest.get(hatebuApiUrl, {
+        query: {
+            'url': entry['url']
+        }
+    }).on('complete', function(data, response) {
+        if (data instanceof Error) {
+            console.log('Error:', data.message);
+            this.retry(1000);
+        } else {
+            var count = data ? data : 0;
+            console.log(entry['day'] + "日目 " + entry['text'] + ": " + count);
+            callback(null, {
+                day: entry['day'],
+                title: entry['text'],
+                url: entry['url'],
+                count: count
+            });
+        }
+    });
 }
 
 function insertHatebuCount(theme, callback) {
-    console.log(theme['themeTitle']);
+    console.log("----------------------" + theme['themeTitle'] + "----------------------");
     var entries = theme['entries'];
-    async.map(entries,
-        getHatebuCount,
-        function(err, entries) {
-            callback(null, {
-                themeTitle: theme['themeTitle'],
-                themeCalendarUrl: theme['themeCalendarUrl'],
-                entries: entries
-            });
+    asyncMap(entries, getHatebuCount, function(err, entries) {
+        callback(null, {
+            themeTitle: theme['themeTitle'],
+            themeCalendarUrl: theme['themeCalendarUrl'],
+            entries: entries
         });
+    });
 }
 
 function asyncMap(ary, iter, callback) {
-    async.map(ary, iter, function(err, results) {
+    async.mapLimit(ary, 10, iter, function(err, results) {
         callback(null, results);
     });
 }
@@ -107,7 +117,6 @@ async.waterfall(
             asyncMap(results, insertHatebuCount, callback);
         }
     ], function(err, results) {
-        console.log(results);
         fs.writeFile('results.json', JSON.stringify(results), function(err) {
             if (err) {
                 console.log(err);
